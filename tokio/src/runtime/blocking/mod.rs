@@ -4,7 +4,7 @@
 //! compilation.
 
 mod pool;
-pub(crate) use pool::{spawn_blocking, BlockingPool, Spawner};
+pub(crate) use pool::{spawn_blocking, BlockingPool, Spawner, SpawnerMetrics};
 
 cfg_fs! {
     pub(crate) use pool::spawn_mandatory_blocking;

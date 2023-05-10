@@ -8,11 +8,14 @@ use crate::runtime::builder::ThreadNameFn;
 use crate::runtime::task::{self, JoinHandle};
 use crate::runtime::{Builder, Callback, Handle};
 
-use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Instant,
+};
 
 pub(crate) struct BlockingPool {
     spawner: Spawner,
@@ -24,14 +27,40 @@ pub(crate) struct Spawner {
     inner: Arc<Inner>,
 }
 
-#[derive(Default)]
-pub(crate) struct SpawnerMetrics {
-    num_threads: AtomicUsize,
-    num_idle_threads: AtomicUsize,
-    queue_depth: AtomicUsize,
+#[derive(Debug)]
+pub struct SpawnerMetrics {
+    pub num_threads: AtomicUsize,
+    pub num_idle_threads: AtomicUsize,
+    pub queue_depth: AtomicUsize,
+    metrics_callbacks: MetricsCallbacks,
+}
+
+struct MetricsCallbacks {
+    on_metrics_update: Arc<dyn Fn(&SpawnerMetrics) + Send + Sync + 'static>,
+    on_task_start: Arc<dyn Fn(Duration) + Send + Sync + 'static>,
+}
+
+impl fmt::Debug for MetricsCallbacks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("MetricsCallbacks").finish()
+    }
 }
 
 impl SpawnerMetrics {
+    pub fn new(
+        on_metrics_update: Arc<dyn Fn(&SpawnerMetrics) + Send + Sync + 'static>,
+        on_task_start: Arc<dyn Fn(Duration) + Send + Sync + 'static>,
+    ) -> Self {
+        Self {
+            num_threads: Default::default(),
+            num_idle_threads: Default::default(),
+            queue_depth: Default::default(),
+            metrics_callbacks: MetricsCallbacks {
+                on_metrics_update,
+                on_task_start,
+            },
+        }
+    }
     fn num_threads(&self) -> usize {
         self.num_threads.load(Ordering::Relaxed)
     }
@@ -48,26 +77,33 @@ impl SpawnerMetrics {
 
     fn inc_num_threads(&self) {
         self.num_threads.fetch_add(1, Ordering::Relaxed);
+        (self.metrics_callbacks.on_metrics_update)(&self);
     }
 
     fn dec_num_threads(&self) {
         self.num_threads.fetch_sub(1, Ordering::Relaxed);
+        (self.metrics_callbacks.on_metrics_update)(&self);
     }
 
     fn inc_num_idle_threads(&self) {
         self.num_idle_threads.fetch_add(1, Ordering::Relaxed);
+        (self.metrics_callbacks.on_metrics_update)(&self);
     }
 
     fn dec_num_idle_threads(&self) -> usize {
-        self.num_idle_threads.fetch_sub(1, Ordering::Relaxed)
+        let result = self.num_idle_threads.fetch_sub(1, Ordering::Relaxed);
+        (self.metrics_callbacks.on_metrics_update)(&self);
+        result
     }
 
     fn inc_queue_depth(&self) {
         self.queue_depth.fetch_add(1, Ordering::Relaxed);
+        (self.metrics_callbacks.on_metrics_update)(&self);
     }
 
     fn dec_queue_depth(&self) {
         self.queue_depth.fetch_sub(1, Ordering::Relaxed);
+        (self.metrics_callbacks.on_metrics_update)(&self);
     }
 }
 
@@ -101,7 +137,7 @@ struct Inner {
 }
 
 struct Shared {
-    queue: VecDeque<Task>,
+    queue: VecDeque<(Task, Instant)>,
     num_notify: u32,
     shutdown: bool,
     shutdown_tx: Option<shutdown::Sender>,
@@ -228,7 +264,10 @@ impl BlockingPool {
                     before_stop: builder.before_stop.clone(),
                     thread_cap,
                     keep_alive,
-                    metrics: Default::default(),
+                    metrics: SpawnerMetrics::new(
+                        builder.spawner_metrics_cb.clone(),
+                        builder.task_start_cb.clone(),
+                    ),
                 }),
             },
             shutdown_rx,
@@ -386,6 +425,7 @@ impl Spawner {
     }
 
     fn spawn_task(&self, task: Task, rt: &Handle) -> Result<(), SpawnError> {
+        let start = Instant::now();
         let mut shared = self.inner.shared.lock();
 
         if shared.shutdown {
@@ -398,7 +438,7 @@ impl Spawner {
             return Err(SpawnError::ShuttingDown);
         }
 
-        shared.queue.push_back(task);
+        shared.queue.push_back((task, start));
         self.inner.metrics.inc_queue_depth();
 
         if self.inner.metrics.num_idle_threads() == 0 {
@@ -505,9 +545,10 @@ impl Inner {
 
         'main: loop {
             // BUSY
-            while let Some(task) = shared.queue.pop_front() {
+            while let Some((task, queued_at)) = shared.queue.pop_front() {
                 self.metrics.dec_queue_depth();
                 drop(shared);
+                (self.metrics.metrics_callbacks.on_task_start)(queued_at.elapsed());
                 task.run();
 
                 shared = self.shared.lock();
@@ -547,7 +588,7 @@ impl Inner {
 
             if shared.shutdown {
                 // Drain the queue
-                while let Some(task) = shared.queue.pop_front() {
+                while let Some((task, _)) = shared.queue.pop_front() {
                     self.metrics.dec_queue_depth();
                     drop(shared);
 

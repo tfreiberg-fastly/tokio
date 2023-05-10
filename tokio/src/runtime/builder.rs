@@ -1,10 +1,13 @@
 use crate::runtime::handle::Handle;
-use crate::runtime::{blocking, driver, Callback, Runtime};
+use crate::runtime::{
+    blocking::{self, SpawnerMetrics},
+    driver, Callback, Runtime,
+};
 use crate::util::rand::{RngSeed, RngSeedGenerator};
 
-use std::fmt;
 use std::io;
 use std::time::Duration;
+use std::{fmt, sync::Arc};
 
 /// Builds Tokio Runtime with custom configuration values.
 ///
@@ -94,6 +97,11 @@ pub struct Builder {
 
     /// Specify a random number generator seed to provide deterministic results
     pub(super) seed_generator: RngSeedGenerator,
+
+    /// DOCS
+    pub(super) spawner_metrics_cb: Arc<dyn Fn(&SpawnerMetrics) + Send + Sync>,
+    /// DOCS
+    pub(super) task_start_cb: Arc<dyn Fn(Duration) + Send + Sync + 'static>,
 
     #[cfg(tokio_unstable)]
     pub(super) unhandled_panic: UnhandledPanic,
@@ -269,6 +277,8 @@ impl Builder {
             unhandled_panic: UnhandledPanic::Ignore,
 
             disable_lifo_slot: false,
+            spawner_metrics_cb: Arc::new(|_| ()),
+            task_start_cb: Arc::new(|_| ()),
         }
     }
 
@@ -381,6 +391,15 @@ impl Builder {
     pub fn max_blocking_threads(&mut self, val: usize) -> &mut Self {
         assert!(val > 0, "Max blocking threads cannot be set to 0");
         self.max_blocking_threads = val;
+        self
+    }
+
+    /// DOCS
+    pub fn spawner_metrics_callback(
+        &mut self,
+        on_metrics_update: impl Fn(&SpawnerMetrics) + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.spawner_metrics_cb = Arc::new(on_metrics_update);
         self
     }
 
