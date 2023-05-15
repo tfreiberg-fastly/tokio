@@ -1,8 +1,5 @@
 use crate::runtime::handle::Handle;
-use crate::runtime::{
-    blocking::{self, SpawnerMetrics},
-    driver, Callback, Runtime,
-};
+use crate::runtime::{blocking, driver, Callback, Runtime};
 use crate::util::rand::{RngSeed, RngSeedGenerator};
 
 use std::io;
@@ -99,7 +96,11 @@ pub struct Builder {
     pub(super) seed_generator: RngSeedGenerator,
 
     /// DOCS
-    pub(super) spawner_metrics_cb: Arc<dyn Fn(&SpawnerMetrics) + Send + Sync>,
+    pub(super) on_queued: Arc<dyn Fn(usize) + Send + Sync + 'static>,
+    /// DOCS
+    pub(super) on_worker_thread_active: Arc<dyn Fn(usize) + Send + Sync + 'static>,
+    /// DOCS
+    pub(super) on_worker_thread_idle: Arc<dyn Fn(usize) + Send + Sync + 'static>,
     /// DOCS
     pub(super) task_start_cb: Arc<dyn Fn(Duration) + Send + Sync + 'static>,
 
@@ -277,7 +278,9 @@ impl Builder {
             unhandled_panic: UnhandledPanic::Ignore,
 
             disable_lifo_slot: false,
-            spawner_metrics_cb: Arc::new(|_| ()),
+            on_queued: Arc::new(|_| ()),
+            on_worker_thread_active: Arc::new(|_| ()),
+            on_worker_thread_idle: Arc::new(|_| ()),
             task_start_cb: Arc::new(|_| ()),
         }
     }
@@ -397,9 +400,22 @@ impl Builder {
     /// DOCS
     pub fn spawner_metrics_callback(
         &mut self,
-        on_metrics_update: impl Fn(&SpawnerMetrics) + Send + Sync + 'static,
+        on_queued: impl Fn(usize) + Send + Sync + 'static,
+        on_worker_thread_active: impl Fn(usize) + Send + Sync + 'static,
+        on_worker_thread_idle: impl Fn(usize) + Send + Sync + 'static,
     ) -> &mut Self {
-        self.spawner_metrics_cb = Arc::new(on_metrics_update);
+        self.on_queued = Arc::new(on_queued);
+        self.on_worker_thread_active = Arc::new(on_worker_thread_active);
+        self.on_worker_thread_idle = Arc::new(on_worker_thread_idle);
+        self
+    }
+
+    /// DOCS
+    pub fn task_start_callback(
+        &mut self,
+        on_task_start: impl Fn(Duration) + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.task_start_cb = Arc::new(on_task_start);
         self
     }
 

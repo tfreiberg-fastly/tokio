@@ -27,16 +27,19 @@ pub(crate) struct Spawner {
     inner: Arc<Inner>,
 }
 
+/// DOCS
 #[derive(Debug)]
 pub struct SpawnerMetrics {
-    pub num_threads: AtomicUsize,
-    pub num_idle_threads: AtomicUsize,
-    pub queue_depth: AtomicUsize,
+    num_threads: AtomicUsize,
+    num_idle_threads: AtomicUsize,
+    queue_depth: AtomicUsize,
     metrics_callbacks: MetricsCallbacks,
 }
 
 struct MetricsCallbacks {
-    on_metrics_update: Arc<dyn Fn(&SpawnerMetrics) + Send + Sync + 'static>,
+    on_queued: Arc<dyn Fn(usize) + Send + Sync>,
+    on_worker_thread_active: Arc<dyn Fn(usize) + Send + Sync>,
+    on_worker_thread_idle: Arc<dyn Fn(usize) + Send + Sync>,
     on_task_start: Arc<dyn Fn(Duration) + Send + Sync + 'static>,
 }
 
@@ -47,8 +50,10 @@ impl fmt::Debug for MetricsCallbacks {
 }
 
 impl SpawnerMetrics {
-    pub fn new(
-        on_metrics_update: Arc<dyn Fn(&SpawnerMetrics) + Send + Sync + 'static>,
+    pub(crate) fn new(
+        on_queued: Arc<dyn Fn(usize) + Send + Sync>,
+        on_worker_thread_active: Arc<dyn Fn(usize) + Send + Sync>,
+        on_worker_thread_idle: Arc<dyn Fn(usize) + Send + Sync>,
         on_task_start: Arc<dyn Fn(Duration) + Send + Sync + 'static>,
     ) -> Self {
         Self {
@@ -56,7 +61,9 @@ impl SpawnerMetrics {
             num_idle_threads: Default::default(),
             queue_depth: Default::default(),
             metrics_callbacks: MetricsCallbacks {
-                on_metrics_update,
+                on_queued,
+                on_worker_thread_active,
+                on_worker_thread_idle,
                 on_task_start,
             },
         }
@@ -76,34 +83,30 @@ impl SpawnerMetrics {
     }
 
     fn inc_num_threads(&self) {
-        self.num_threads.fetch_add(1, Ordering::Relaxed);
-        (self.metrics_callbacks.on_metrics_update)(&self);
+        let num_threads = self.num_threads.fetch_add(1, Ordering::Relaxed);
+        (self.metrics_callbacks.on_worker_thread_active)(num_threads + 1)
     }
 
     fn dec_num_threads(&self) {
         self.num_threads.fetch_sub(1, Ordering::Relaxed);
-        (self.metrics_callbacks.on_metrics_update)(&self);
     }
 
     fn inc_num_idle_threads(&self) {
-        self.num_idle_threads.fetch_add(1, Ordering::Relaxed);
-        (self.metrics_callbacks.on_metrics_update)(&self);
+        let num_idle_threads = self.num_idle_threads.fetch_add(1, Ordering::Relaxed);
+        (self.metrics_callbacks.on_worker_thread_idle)(num_idle_threads + 1)
     }
 
     fn dec_num_idle_threads(&self) -> usize {
-        let result = self.num_idle_threads.fetch_sub(1, Ordering::Relaxed);
-        (self.metrics_callbacks.on_metrics_update)(&self);
-        result
+        self.num_idle_threads.fetch_sub(1, Ordering::Relaxed)
     }
 
     fn inc_queue_depth(&self) {
-        self.queue_depth.fetch_add(1, Ordering::Relaxed);
-        (self.metrics_callbacks.on_metrics_update)(&self);
+        let queue_depth = self.queue_depth.fetch_add(1, Ordering::Relaxed);
+        (self.metrics_callbacks.on_queued)(queue_depth + 1)
     }
 
     fn dec_queue_depth(&self) {
         self.queue_depth.fetch_sub(1, Ordering::Relaxed);
-        (self.metrics_callbacks.on_metrics_update)(&self);
     }
 }
 
@@ -265,7 +268,9 @@ impl BlockingPool {
                     thread_cap,
                     keep_alive,
                     metrics: SpawnerMetrics::new(
-                        builder.spawner_metrics_cb.clone(),
+                        builder.on_queued.clone(),
+                        builder.on_worker_thread_active.clone(),
+                        builder.on_worker_thread_idle.clone(),
                         builder.task_start_cb.clone(),
                     ),
                 }),

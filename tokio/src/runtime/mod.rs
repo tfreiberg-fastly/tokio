@@ -212,6 +212,7 @@ cfg_rt! {
     mod blocking;
     #[cfg_attr(tokio_wasi, allow(unused_imports))]
     pub(crate) use blocking::spawn_blocking;
+    pub use blocking::SpawnerMetrics;
 
     cfg_trace! {
         pub(crate) use blocking::Mandatory;
